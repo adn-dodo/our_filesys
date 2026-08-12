@@ -1,5 +1,4 @@
 #include "file_io.h"
-#include "ufs_internal.h"
 #include "userfs.h"
 
 #include <errno.h>
@@ -10,30 +9,20 @@
 
 #define UFS_MAX_IO_COUNT ((size_t)(SIZE_MAX >> 1U))
 
-/*
- * Integration contract with the other UserFS modules.
- * Every helper returns 0 on success or a negative errno value on failure.
- */
-int ufs_is_mounted(void);
-int resolve_path(const char *path, uint32_t *inode_number);
-int read_inode(uint32_t inode_number, struct ufs_inode *inode);
-int read_block(uint32_t block_number, void *buffer);
-int write_block(uint32_t block_number, const void *buffer);
-int get_inode_data_block(const struct ufs_inode *inode,
-                         uint32_t logical_block,
-                         uint32_t *physical_block);
-int ufs_truncate_inode(uint32_t inode_number,
-                       struct ufs_inode *inode,
-                       uint64_t new_size);
+#ifdef UFS_TRACE
+#define TRACE(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define TRACE(...) ((void)0)
+#endif
 
-struct ufs_file_descriptor {
+struct file_io_descriptor {
     int in_use;
     uint32_t inode_number;
     off_t offset;
     int flags;
 };
 
-static struct ufs_file_descriptor descriptor_table[UFS_MAX_OPEN_FILES];
+static struct file_io_descriptor descriptor_table[UFS_MAX_OPEN_FILES];
 
 static int fail_from_helper(int result);
 static int require_mounted(void);
@@ -134,7 +123,7 @@ static int descriptor_can_write(int fd)
 int ufs_open(const char *path, int flags)
 {
     uint32_t inode_number;
-    struct ufs_inode inode;
+    file_io_inode_t inode;
     int fd;
     int result;
 
@@ -153,7 +142,7 @@ int ufs_open(const char *path, int flags)
         return fail_from_helper(result);
     }
 
-    result = read_inode(inode_number, &inode);
+    result = read_inode_for_io(inode_number, &inode);
     if (result < 0) {
         return fail_from_helper(result);
     }
@@ -175,6 +164,9 @@ int ufs_open(const char *path, int flags)
     descriptor_table[fd].inode_number = inode_number;
     descriptor_table[fd].offset = 0;
     descriptor_table[fd].flags = flags;
+
+    TRACE("[I/O] open path=%s inode=%u fd=%d flags=0x%x\n",
+          path, (unsigned int)inode_number, fd, flags);
     return fd;
 }
 
@@ -184,13 +176,18 @@ int ufs_close(int fd)
         return -1;
     }
 
+    TRACE("[I/O] close fd=%d inode=%u offset=%lld\n",
+          fd,
+          (unsigned int)descriptor_table[fd].inode_number,
+          (long long)descriptor_table[fd].offset);
+
     memset(&descriptor_table[fd], 0, sizeof(descriptor_table[fd]));
     return 0;
 }
 
 ssize_t ufs_read(int fd, void *buf, size_t count)
 {
-    struct ufs_inode inode;
+    file_io_inode_t inode;
     uint8_t block[UFS_BLOCK_SIZE];
     size_t total = 0;
     uint64_t available;
@@ -215,14 +212,19 @@ ssize_t ufs_read(int fd, void *buf, size_t count)
         return -1;
     }
 
-    result = read_inode(descriptor_table[fd].inode_number, &inode);
+    result = read_inode_for_io(descriptor_table[fd].inode_number, &inode);
     if (result < 0) {
         return fail_from_helper(result);
     }
 
     if ((uint64_t)descriptor_table[fd].offset >= inode.size) {
+        TRACE("[I/O] read fd=%d offset=%lld count=%zu -> EOF\n",
+              fd, (long long)descriptor_table[fd].offset, count);
         return 0;
     }
+
+    TRACE("[I/O] read fd=%d offset=%lld count=%zu\n",
+          fd, (long long)descriptor_table[fd].offset, count);
 
     available = inode.size - (uint64_t)descriptor_table[fd].offset;
     if ((uint64_t)count > available) {
@@ -240,7 +242,8 @@ ssize_t ufs_read(int fd, void *buf, size_t count)
             chunk = count - total;
         }
 
-        result = get_inode_data_block(&inode, logical_block, &physical_block);
+        result = get_inode_data_block_for_io(&inode, logical_block,
+                                             &physical_block);
         if (result < 0) {
             if (total > 0) {
                 return (ssize_t)total;
@@ -248,7 +251,12 @@ ssize_t ufs_read(int fd, void *buf, size_t count)
             return fail_from_helper(result);
         }
 
-        result = read_block(physical_block, block);
+        TRACE("[I/O] read map logical=%u physical=%u chunk=%zu\n",
+              (unsigned int)logical_block,
+              (unsigned int)physical_block,
+              chunk);
+
+        result = read_block_for_io(physical_block, block);
         if (result < 0) {
             if (total > 0) {
                 return (ssize_t)total;
@@ -261,12 +269,14 @@ ssize_t ufs_read(int fd, void *buf, size_t count)
         total += chunk;
     }
 
+    TRACE("[I/O] read done fd=%d bytes=%zu new_offset=%lld\n",
+          fd, total, (long long)descriptor_table[fd].offset);
     return (ssize_t)total;
 }
 
 ssize_t ufs_write(int fd, const void *buf, size_t count)
 {
-    struct ufs_inode inode;
+    file_io_inode_t inode;
     uint8_t block[UFS_BLOCK_SIZE];
     uint64_t start;
     uint64_t end;
@@ -292,7 +302,7 @@ ssize_t ufs_write(int fd, const void *buf, size_t count)
         return -1;
     }
 
-    result = read_inode(descriptor_table[fd].inode_number, &inode);
+    result = read_inode_for_io(descriptor_table[fd].inode_number, &inode);
     if (result < 0) {
         return fail_from_helper(result);
     }
@@ -309,9 +319,15 @@ ssize_t ufs_write(int fd, const void *buf, size_t count)
     }
     end = start + (uint64_t)count;
 
+    TRACE("[I/O] write fd=%d offset=%llu count=%zu append=%d\n",
+          fd,
+          (unsigned long long)start,
+          count,
+          (descriptor_table[fd].flags & UFS_O_APPEND) != 0);
+
     if (end > inode.size) {
-        result = ufs_truncate_inode(descriptor_table[fd].inode_number,
-                                    &inode, end);
+        result = truncate_inode_for_io(descriptor_table[fd].inode_number,
+                                       &inode, end);
         if (result < 0) {
             return fail_from_helper(result);
         }
@@ -328,7 +344,8 @@ ssize_t ufs_write(int fd, const void *buf, size_t count)
             chunk = count - total;
         }
 
-        result = get_inode_data_block(&inode, logical_block, &physical_block);
+        result = get_inode_data_block_for_io(&inode, logical_block,
+                                             &physical_block);
         if (result < 0) {
             if (total > 0) {
                 descriptor_table[fd].offset = (off_t)(start + total);
@@ -337,10 +354,15 @@ ssize_t ufs_write(int fd, const void *buf, size_t count)
             return fail_from_helper(result);
         }
 
+        TRACE("[I/O] write map logical=%u physical=%u chunk=%zu\n",
+              (unsigned int)logical_block,
+              (unsigned int)physical_block,
+              chunk);
+
         if (inside_block == 0 && chunk == UFS_BLOCK_SIZE) {
             memcpy(block, (const uint8_t *)buf + total, UFS_BLOCK_SIZE);
         } else {
-            result = read_block(physical_block, block);
+            result = read_block_for_io(physical_block, block);
             if (result < 0) {
                 if (total > 0) {
                     descriptor_table[fd].offset = (off_t)(start + total);
@@ -351,7 +373,7 @@ ssize_t ufs_write(int fd, const void *buf, size_t count)
             memcpy(block + inside_block, (const uint8_t *)buf + total, chunk);
         }
 
-        result = write_block(physical_block, block);
+        result = write_block_for_io(physical_block, block);
         if (result < 0) {
             if (total > 0) {
                 descriptor_table[fd].offset = (off_t)(start + total);
@@ -364,6 +386,8 @@ ssize_t ufs_write(int fd, const void *buf, size_t count)
     }
 
     descriptor_table[fd].offset = (off_t)(start + total);
+    TRACE("[I/O] write done fd=%d bytes=%zu new_offset=%lld\n",
+          fd, total, (long long)descriptor_table[fd].offset);
     return (ssize_t)total;
 }
 
@@ -393,7 +417,7 @@ static int add_seek_offset(uint64_t base, off_t change, off_t *result)
 
 off_t ufs_seek(int fd, off_t offset, int whence)
 {
-    struct ufs_inode inode;
+    file_io_inode_t inode;
     uint64_t base;
     off_t new_offset;
     int result;
@@ -410,7 +434,7 @@ off_t ufs_seek(int fd, off_t offset, int whence)
         base = (uint64_t)descriptor_table[fd].offset;
         break;
     case SEEK_END:
-        result = read_inode(descriptor_table[fd].inode_number, &inode);
+        result = read_inode_for_io(descriptor_table[fd].inode_number, &inode);
         if (result < 0) {
             fail_from_helper(result);
             return (off_t)-1;
@@ -427,5 +451,7 @@ off_t ufs_seek(int fd, off_t offset, int whence)
     }
 
     descriptor_table[fd].offset = new_offset;
+    TRACE("[I/O] seek fd=%d whence=%d change=%lld new_offset=%lld\n",
+          fd, whence, (long long)offset, (long long)new_offset);
     return new_offset;
 }
