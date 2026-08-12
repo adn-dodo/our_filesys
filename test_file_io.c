@@ -1,5 +1,4 @@
 #include "file_io.h"
-#include "ufs_internal.h"
 #include "userfs.h"
 
 #include <assert.h>
@@ -19,7 +18,7 @@
 
 static int mock_mounted;
 static int mock_force_enospc;
-static struct ufs_inode mock_inodes[3];
+static file_io_inode_t mock_inodes[3];
 static uint8_t mock_blocks[MOCK_DATA_BLOCKS][UFS_BLOCK_SIZE];
 static int tests_passed;
 
@@ -33,16 +32,16 @@ static void reset_mock(void)
     mock_force_enospc = 0;
 
     mock_inodes[TEST_FILE_INODE].type = UFS_TYPE_FILE;
-    mock_inodes[TEST_FILE_INODE].single_indirect = UFS_INVALID_BLOCK;
-    mock_inodes[TEST_FILE_INODE].double_indirect = UFS_INVALID_BLOCK;
+    mock_inodes[TEST_FILE_INODE].single_indirect = FILE_IO_INVALID_BLOCK;
+    mock_inodes[TEST_FILE_INODE].double_indirect = FILE_IO_INVALID_BLOCK;
 
     mock_inodes[TEST_DIR_INODE].type = UFS_TYPE_DIR;
-    mock_inodes[TEST_DIR_INODE].single_indirect = UFS_INVALID_BLOCK;
-    mock_inodes[TEST_DIR_INODE].double_indirect = UFS_INVALID_BLOCK;
+    mock_inodes[TEST_DIR_INODE].single_indirect = FILE_IO_INVALID_BLOCK;
+    mock_inodes[TEST_DIR_INODE].double_indirect = FILE_IO_INVALID_BLOCK;
 
-    for (i = 0; i < UFS_DIRECT_BLOCKS; ++i) {
-        mock_inodes[TEST_FILE_INODE].direct[i] = UFS_INVALID_BLOCK;
-        mock_inodes[TEST_DIR_INODE].direct[i] = UFS_INVALID_BLOCK;
+    for (i = 0; i < FILE_IO_DIRECT_BLOCKS; ++i) {
+        mock_inodes[TEST_FILE_INODE].direct[i] = FILE_IO_INVALID_BLOCK;
+        mock_inodes[TEST_DIR_INODE].direct[i] = FILE_IO_INVALID_BLOCK;
     }
 
     descriptor_table_reset();
@@ -82,7 +81,7 @@ int resolve_path(const char *path, uint32_t *inode_number)
     return -ENOENT;
 }
 
-int read_inode(uint32_t inode_number, struct ufs_inode *inode)
+int read_inode_for_io(uint32_t inode_number, file_io_inode_t *inode)
 {
     if (inode_number >= 3U || inode == NULL) {
         return -EINVAL;
@@ -91,48 +90,48 @@ int read_inode(uint32_t inode_number, struct ufs_inode *inode)
     return 0;
 }
 
-int read_block(uint32_t block_number, void *buffer)
+int read_block_for_io(uint32_t block_number, void *buffer)
 {
-    if (block_number < UFS_DATA_REGION_START_BLK ||
-        block_number >= UFS_DATA_REGION_START_BLK + MOCK_DATA_BLOCKS ||
+    if (block_number < FILE_IO_DATA_START ||
+        block_number >= FILE_IO_DATA_START + MOCK_DATA_BLOCKS ||
         buffer == NULL) {
         return -EIO;
     }
     memcpy(buffer,
-           mock_blocks[block_number - UFS_DATA_REGION_START_BLK],
+           mock_blocks[block_number - FILE_IO_DATA_START],
            UFS_BLOCK_SIZE);
     return 0;
 }
 
-int write_block(uint32_t block_number, const void *buffer)
+int write_block_for_io(uint32_t block_number, const void *buffer)
 {
-    if (block_number < UFS_DATA_REGION_START_BLK ||
-        block_number >= UFS_DATA_REGION_START_BLK + MOCK_DATA_BLOCKS ||
+    if (block_number < FILE_IO_DATA_START ||
+        block_number >= FILE_IO_DATA_START + MOCK_DATA_BLOCKS ||
         buffer == NULL) {
         return -EIO;
     }
-    memcpy(mock_blocks[block_number - UFS_DATA_REGION_START_BLK],
+    memcpy(mock_blocks[block_number - FILE_IO_DATA_START],
            buffer,
            UFS_BLOCK_SIZE);
     return 0;
 }
 
-int get_inode_data_block(const struct ufs_inode *inode,
-                         uint32_t logical_block,
-                         uint32_t *physical_block)
+int get_inode_data_block_for_io(const file_io_inode_t *inode,
+                                uint32_t logical_block,
+                                uint32_t *physical_block)
 {
     if (inode == NULL || physical_block == NULL ||
-        logical_block >= UFS_DIRECT_BLOCKS ||
-        inode->direct[logical_block] == UFS_INVALID_BLOCK) {
+        logical_block >= FILE_IO_DIRECT_BLOCKS ||
+        inode->direct[logical_block] == FILE_IO_INVALID_BLOCK) {
         return -EIO;
     }
     *physical_block = inode->direct[logical_block];
     return 0;
 }
 
-int ufs_truncate_inode(uint32_t inode_number,
-                       struct ufs_inode *inode,
-                       uint64_t new_size)
+int truncate_inode_for_io(uint32_t inode_number,
+                          file_io_inode_t *inode,
+                          uint64_t new_size)
 {
     uint32_t old_blocks;
     uint32_t new_blocks;
@@ -152,7 +151,7 @@ int ufs_truncate_inode(uint32_t inode_number,
     }
 
     while (old_blocks < new_blocks) {
-        inode->direct[old_blocks] = UFS_DATA_REGION_START_BLK + old_blocks;
+        inode->direct[old_blocks] = FILE_IO_DATA_START + old_blocks;
         memset(mock_blocks[old_blocks], 0, UFS_BLOCK_SIZE);
         ++old_blocks;
     }
@@ -398,6 +397,81 @@ static void test_seek_rules(void)
     pass("reject seek on invalid descriptor");
 }
 
+static void test_independent_offsets(void)
+{
+    char first[3] = {0};
+    char second[3] = {0};
+    int writer;
+    int fd1;
+    int fd2;
+
+    reset_mock();
+    writer = ufs_open("/file", UFS_O_WRONLY);
+    assert(writer >= 0);
+    assert(ufs_write(writer, "abcdef", 6) == 6);
+    assert(ufs_close(writer) == 0);
+
+    fd1 = ufs_open("/file", UFS_O_RDONLY);
+    fd2 = ufs_open("/file", UFS_O_RDONLY);
+    assert(fd1 >= 0 && fd2 >= 0);
+
+    assert(ufs_read(fd1, first, 2) == 2);
+    assert(ufs_read(fd1, first, 1) == 1);
+    assert(ufs_read(fd2, second, 2) == 2);
+    assert(memcmp(second, "ab", 2) == 0);
+
+    assert(ufs_close(fd1) == 0);
+    assert(ufs_close(fd2) == 0);
+    pass("two descriptors keep independent offsets");
+}
+
+static void test_multiple_append_descriptors(void)
+{
+    char result[4] = {0};
+    int fd1;
+    int fd2;
+    int reader;
+
+    reset_mock();
+    fd1 = ufs_open("/file", UFS_O_WRONLY | UFS_O_APPEND);
+    fd2 = ufs_open("/file", UFS_O_WRONLY | UFS_O_APPEND);
+    assert(fd1 >= 0 && fd2 >= 0);
+
+    assert(ufs_write(fd1, "A", 1) == 1);
+    assert(ufs_write(fd2, "B", 1) == 1);
+    assert(ufs_write(fd1, "C", 1) == 1);
+    assert(ufs_close(fd1) == 0);
+    assert(ufs_close(fd2) == 0);
+
+    reader = ufs_open("/file", UFS_O_RDONLY);
+    assert(reader >= 0);
+    assert(ufs_read(reader, result, 3) == 3);
+    assert(memcmp(result, "ABC", 3) == 0);
+    assert(ufs_close(reader) == 0);
+    pass("multiple append descriptors use current EOF");
+}
+
+static void test_binary_data(void)
+{
+    static const uint8_t written[] = {
+        0x00U, 0xffU, 0x12U, 0x00U, 0x80U, 0x7fU
+    };
+    uint8_t received[sizeof(written)] = {0};
+    int fd;
+
+    reset_mock();
+    fd = ufs_open("/file", UFS_O_RDWR);
+    assert(fd >= 0);
+    assert(ufs_write(fd, written, sizeof(written)) ==
+           (ssize_t)sizeof(written));
+    assert(ufs_seek(fd, 0, SEEK_SET) == 0);
+    assert(ufs_read(fd, received, sizeof(received)) ==
+           (ssize_t)sizeof(received));
+    assert(memcmp(written, received, sizeof(written)) == 0);
+    assert(ufs_close(fd) == 0);
+    pass("binary data including zero bytes");
+}
+
 static void test_unmounted(void)
 {
     reset_mock();
@@ -414,6 +488,9 @@ int main(void)
     test_read_rules();
     test_write_rules();
     test_seek_rules();
+    test_independent_offsets();
+    test_multiple_append_descriptors();
+    test_binary_data();
     test_unmounted();
 
     printf("\nMember 4 tests passed: %d\n", tests_passed);
