@@ -25,7 +25,7 @@
  * stub harness used to sanity-check this file in isolation.
  */
 #include "userfs_internal.h"
-#include "userfs-storage"
+#include "userfs_storage.h"
 #include "ufs_internal.h"
 #include <errno.h>
 #include <string.h>
