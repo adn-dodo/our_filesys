@@ -108,6 +108,33 @@ int ufs_truncate(const char *path, size_t size)
     (void)size;
     errno = ENOSYS;
     return -1;
+    /*
+    if (!g_ufs.mounted) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (path == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    uint32_t inode_num;
+    if (resolve_path(path, &inode_num) != 0) {
+        return -1;
+    }
+ 
+    struct ufs_inode inode;
+    if (read_inode(inode_num, &inode) != 0) {
+        return -1;
+    }
+ 
+    if (inode.type != UFS_TYPE_FILE) {
+        errno = EISDIR;
+        return -1;
+    }
+ 
+    return ufs_truncate_inode(inode_num, &inode, size); 
+    */
 }
 
 int ufs_stat(const char *path, struct ufs_stat *st)
