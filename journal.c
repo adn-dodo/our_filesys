@@ -43,15 +43,6 @@
 #endif
 
 /* In-memory transaction struct (fallback if not in journal.h) */
-#ifndef UFS_TX_STRUCT_DEFINED
-#define UFS_TX_STRUCT_DEFINED
-struct ufs_transaction {
-    uint32_t seq;
-    uint32_t num_blocks;
-    uint32_t target_blocks[UFS_MAX_TX_BLOCKS];
-    uint8_t  buffers[UFS_MAX_TX_BLOCKS][UFS_BLOCK_SIZE];
-};
-#endif
 
 /* On-disk Journal Header Block */
 struct ufs_journal_header {

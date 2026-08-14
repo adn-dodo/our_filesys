@@ -36,3 +36,11 @@ void ufs_init_inode(struct ufs_inode *inode, uint32_t type) {
     inode->single_indirect = UFS_INVALID_BLOCK;
     inode->double_indirect = UFS_INVALID_BLOCK;
 }
+/* Mocked namespace dependency to satisfy the linker for ufs_truncate */
+int resolve_path(const char *path, uint32_t *out_inode_num) {
+    (void)path; /* Suppress unused parameter warning */
+    if (out_inode_num) {
+        *out_inode_num = 0; 
+    }
+    return 0;
+}
