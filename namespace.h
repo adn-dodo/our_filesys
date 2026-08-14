@@ -2,7 +2,6 @@
 #define NAMESPACE_H
 
 #include "userfs.h"
-#include "ufs_internal.h" 
 #include <stdint.h>
 
 // ---------------------------------------------------------

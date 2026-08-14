@@ -92,14 +92,24 @@ struct ufs_disk_dirent {
     uint32_t reserved[5];
 };
 
-/* ---------- Temporary in-memory descriptor ---------- */
+/* ---------- Shared mounted-image state ---------- */
 
-struct ufs_file_descriptor {
-    int in_use;
-    uint32_t inode_number;
-    off_t offset;
-    int flags;
+struct ufs_context {
+    int mounted;
+    int fd;
+    struct ufs_superblock sb;
 };
+
+extern struct ufs_context g_ufs;
+
+/* Lifecycle-owned services used by the other implementation modules. */
+int ufs_is_mounted(void);
+int ufs_read_block(uint32_t block_number, void *buffer);
+int ufs_write_block(uint32_t block_number, const void *buffer);
+int ufs_flush_superblock(void);
+
+/* Put a new inode into a safe, empty state with invalid block pointers. */
+void ufs_init_inode(struct ufs_inode *inode, uint32_t type);
 
 /* ---------- Compile-time size checks ---------- */
 
