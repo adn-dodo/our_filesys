@@ -1,61 +1,70 @@
 #ifndef UFS_INTERNAL_H
 #define UFS_INTERNAL_H
 
+#include "userfs.h"
+
 #include <stdint.h>
-#include <stddef.h>
-#include <string.h>
 
-/* ---------- Mocked Version 2 Layout Constants ---------- */
+/* ---------- General filesystem design ---------- */
 
-#define UFS_BLOCK_SIZE 512
-#define UFS_TOTAL_BLOCKS 32768       /* 16 MiB image */
-#define UFS_MAX_INODES 512
-#define UFS_INODE_SIZE 128           /* Expanded to 128 bytes */
-#define UFS_ROOT_INODE 0
+#define UFS_MAGIC          0x55465331U
+#define UFS_VERSION        1U
 
-/* Block Pointers */
-#define UFS_DIRECT_BLOCKS 8
-#define UFS_INVALID_BLOCK UINT32_MAX
+#define UFS_TOTAL_BLOCKS   2048U
+#define UFS_IMAGE_SIZE     (UFS_TOTAL_BLOCKS * UFS_BLOCK_SIZE)
 
-/* Region Start Blocks (Based on V2 Specs) */
-#define UFS_SUPERBLOCK_BLK 0
-#define UFS_INODE_BITMAP_BLK 1
+#define UFS_MAX_INODES     256U
+#define UFS_ROOT_INODE     0U
 
-#define UFS_BLOCK_BITMAP_START_BLK 2
-#define UFS_BLOCK_BITMAP_BLOCKS 8    /* 8 blocks for the bitmap */
+#define UFS_INODE_SIZE     64U
+#define UFS_DIRENT_SIZE    64U
 
-#define UFS_INODE_TABLE_START_BLK 10 /* Blocks 10-137 */
-#define UFS_INODE_TABLE_BLOCKS 128
+#define UFS_DIRECT_BLOCKS  8U
+#define UFS_INVALID_BLOCK  UINT32_MAX
 
-#define UFS_JOURNAL_START_BLK 138    /* Blocks 138-2185 reserved for journal */
+/* ---------- Disk-image layout ---------- */
 
-#define UFS_DATA_REGION_START_BLK 2186
-#define UFS_DATA_REGION_BLOCKS 30582 /* 32768 - 2186 */
+#define UFS_SUPERBLOCK_BLK          0U
+#define UFS_INODE_BITMAP_BLK        1U
+#define UFS_BLOCK_BITMAP_BLK        2U
 
-/* Journal Magic Numbers */
-#define UFS_JOURNAL_MAGIC 0x4A4F5552U
-#define UFS_JOURNAL_COMMIT_MAGIC 0x434F4D4DU
+#define UFS_INODE_TABLE_START_BLK   3U
+#define UFS_INODE_TABLE_BLOCKS      32U
 
-/* File Types (Needed for ufs_init_inode) */
-#define UFS_TYPE_FILE 1
-#define UFS_TYPE_DIR  2
-#define UFS_TYPE_LINK 3              /* Symlink added in V2 */
+#define UFS_DATA_REGION_START_BLK   35U
+#define UFS_DATA_REGION_BLOCKS      2013U
 
-/* ---------- Mocked Structs ---------- */
+/* ---------- Superblock: exactly 512 bytes ---------- */
 
 struct ufs_superblock {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t block_size;
+    uint32_t total_blocks;
+
+    uint32_t inode_bitmap_start;
+    uint32_t inode_bitmap_blocks;
+
+    uint32_t block_bitmap_start;
+    uint32_t block_bitmap_blocks;
+
+    uint32_t inode_table_start;
+    uint32_t inode_table_blocks;
+
+    uint32_t data_region_start;
+    uint32_t data_region_blocks;
+
+    uint32_t total_inodes;
+    uint32_t root_inode;
+
     uint32_t free_inodes;
     uint32_t free_blocks;
-    /* (Other superblock fields omitted in the mock to save space, 
-     * as Member 2's code only actively mutates the free counts) */
+
+    uint8_t padding[448];
 };
 
-struct ufs_context {
-    int mounted;
-    struct ufs_superblock sb;
-};
+/* ---------- Inode: exactly 64 bytes ---------- */
 
-/* The new 128-byte Inode Struct */
 struct ufs_inode {
     uint32_t type;
     uint32_t flags;
@@ -63,33 +72,54 @@ struct ufs_inode {
     uint64_t size;
     uint32_t block_count;
 
-    uint32_t generation;             /* V2 Generation tracker */
-    
-    uint32_t uid;                    /* Member 5 permissions (Mocked) */
-    uint32_t gid;
-    uint32_t mode;
-    uint32_t link_count;
-
-    uint32_t atime;
-    uint32_t mtime;
-    uint32_t ctime;
-
     uint32_t direct[UFS_DIRECT_BLOCKS];
+
     uint32_t single_indirect;
     uint32_t double_indirect;
 
-    uint32_t reserved[8];            /* Pad out to exactly 128 bytes */
+    uint32_t reserved;
 };
 
-/* Provide the global context so userfs_storage.c can check g_ufs.mounted */
+/* ---------- Directory entry: exactly 64 bytes ---------- */
+
+struct ufs_disk_dirent {
+    uint32_t used;
+    uint32_t inode_number;
+    uint32_t type;
+
+    char name[UFS_MAX_NAME + 1];
+
+    uint32_t reserved[5];
+};
+
+/* ---------- Shared mounted-image state ---------- */
+
+struct ufs_context {
+    int mounted;
+    int fd;
+    struct ufs_superblock sb;
+};
+
 extern struct ufs_context g_ufs;
 
-/* ---------- Mocked Lifecycle Functions ---------- */
-
+/* Lifecycle-owned services used by the other implementation modules. */
 int ufs_is_mounted(void);
 int ufs_read_block(uint32_t block_number, void *buffer);
 int ufs_write_block(uint32_t block_number, const void *buffer);
 int ufs_flush_superblock(void);
+
+/* Put a new inode into a safe, empty state with invalid block pointers. */
 void ufs_init_inode(struct ufs_inode *inode, uint32_t type);
 
-#endif /* UFS_INTERNAL_H */
+/* ---------- Compile-time size checks ---------- */
+
+_Static_assert(sizeof(struct ufs_superblock) == UFS_BLOCK_SIZE,
+               "Superblock must be 512 bytes");
+
+_Static_assert(sizeof(struct ufs_inode) == UFS_INODE_SIZE,
+               "Inode must be 64 bytes");
+
+_Static_assert(sizeof(struct ufs_disk_dirent) == UFS_DIRENT_SIZE,
+               "Directory entry must be 64 bytes");
+
+#endif
