@@ -33,6 +33,11 @@
 #define UFS_MAX_FILE_BLOCKS \
     (UFS_DIRECT_BLOCKS + UFS_SINGLE_INDIRECT_CAPACITY + UFS_DOUBLE_INDIRECT_CAPACITY)
 
+/* Flat in-memory size of the (now multi-block) block bitmap: 8 physical
+ * blocks stitched together, one bit per block in the whole image. */
+#define UFS_BLOCK_BITMAP_BYTES \
+    (UFS_BLOCK_BITMAP_BLOCKS * UFS_BLOCK_SIZE)                   /* 4096 */
+
 /* =====================================================================
  * Bit operations
  * ===================================================================== */
@@ -80,7 +85,13 @@ int read_block_bitmap(uint8_t *bitmap)
         errno = EINVAL;
         return -1;
     }
-    return ufs_read_block(UFS_BLOCK_BITMAP_BLK, bitmap);
+    for (uint32_t i = 0; i < UFS_BLOCK_BITMAP_BLOCKS; i++) {
+        if (ufs_read_block(UFS_BLOCK_BITMAP_START_BLK + i,
+                            bitmap + (size_t)i * UFS_BLOCK_SIZE) != 0) {
+            return -1;
+        }
+    }
+    return 0;
 }
 
 int write_block_bitmap(const uint8_t *bitmap)
@@ -89,7 +100,13 @@ int write_block_bitmap(const uint8_t *bitmap)
         errno = EINVAL;
         return -1;
     }
-    return ufs_write_block(UFS_BLOCK_BITMAP_BLK, bitmap);
+    for (uint32_t i = 0; i < UFS_BLOCK_BITMAP_BLOCKS; i++) {
+        if (ufs_write_block(UFS_BLOCK_BITMAP_START_BLK + i,
+                             bitmap + (size_t)i * UFS_BLOCK_SIZE) != 0) {
+            return -1;
+        }
+    }
+    return 0;
 }
 
 /* =====================================================================
@@ -170,8 +187,25 @@ int allocate_inode(uint32_t *inode_num_out)
             return -1;
         }
 
+        /* Carry the generation number forward across reuse: whatever is
+         * currently stored in this slot (left there by the last
+         * free_inode()) becomes generation+1 for the new occupant. A
+         * descriptor opened against the previous occupant stored the
+         * old generation, so once this slot is reused it no longer
+         * matches and callers can detect the stale handle instead of
+         * silently operating on a different file. */
+        uint32_t next_generation = 1;
+        struct ufs_inode existing;
+        if (read_inode(i, &existing) == 0 && existing.generation != 0) {
+            next_generation = existing.generation + 1;
+            if (next_generation == 0) {
+                next_generation = 1; /* skip 0 on the (practically impossible) wrap */
+            }
+        }
+
         struct ufs_inode inode;
         ufs_init_inode(&inode, 0);
+        inode.generation = next_generation;
 
         if (write_inode(i, &inode) != 0) {
             /* Roll back the bitmap bit so we don't leak the inode slot. */
@@ -226,7 +260,10 @@ int free_inode(uint32_t inode_num)
         return -1;
     }
 
+    uint32_t keep_generation = inode.generation;
+
     ufs_init_inode(&inode, 0);
+    inode.generation = keep_generation;
     if (write_inode(inode_num, &inode) != 0) {
         return -1;
     }
@@ -273,13 +310,14 @@ int allocate_data_block(uint32_t *block_num_out)
         return -1;
     }
 
-    uint8_t bitmap[UFS_BLOCK_SIZE];
+    uint8_t bitmap[UFS_BLOCK_BITMAP_BYTES];
     if (read_block_bitmap(bitmap) != 0) {
         return -1;
     }
 
-    /* Metadata blocks 0-34 are never scanned, so they can never be
-     * (re)allocated even if a caller passes a bad bitmap in by mistake. */
+    /* Metadata/journal blocks (0..UFS_DATA_REGION_START_BLK-1) are never
+     * scanned, so they can never be (re)allocated even if a caller
+     * passes a bad bitmap in by mistake. */
     for (uint32_t b = UFS_DATA_REGION_START_BLK; b < UFS_TOTAL_BLOCKS; b++) {
         if (bitmap_test(bitmap, b)) {
             continue;
@@ -314,12 +352,12 @@ int free_data_block(uint32_t block_num)
         return -1;
     }
     if (block_num < UFS_DATA_REGION_START_BLK || block_num >= UFS_TOTAL_BLOCKS) {
-        /* Never allow freeing metadata blocks (0-34) or out-of-range blocks. */
+        /* Never allow freeing metadata/journal blocks or out-of-range blocks. */
         errno = EINVAL;
         return -1;
     }
 
-    uint8_t bitmap[UFS_BLOCK_SIZE];
+    uint8_t bitmap[UFS_BLOCK_BITMAP_BYTES];
     if (read_block_bitmap(bitmap) != 0) {
         return -1;
     }
