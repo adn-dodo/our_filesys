@@ -62,7 +62,6 @@ struct ufs_superblock {
 
     uint8_t padding[448];
 };
-
 /* ---------- Inode: exactly 64 bytes ---------- */
 
 struct ufs_inode {
@@ -100,6 +99,7 @@ struct ufs_file_descriptor {
     off_t offset;
     int flags;
 };
+
 
 /* ---------- Compile-time size checks ---------- */
 

@@ -554,10 +554,11 @@ int ufs_format(const char *image_path, size_t image_size)
 int ufs_mount(const char *image_path)
 {
     int fd;
+    struct stat st;
     struct ufs_superblock sb;
 
     /*
-     * Validate path.
+     * 1. Validate the image path.
      */
     if (image_path == NULL) {
         errno = EINVAL;
@@ -565,7 +566,8 @@ int ufs_mount(const char *image_path)
     }
 
     /*
-     * Only one filesystem can be mounted at a time.
+     * 2. Reject mounting if a filesystem is
+     *    already mounted.
      */
     if (g_fs.mounted) {
         errno = EBUSY;
@@ -573,7 +575,7 @@ int ufs_mount(const char *image_path)
     }
 
     /*
-     * Open existing disk image.
+     * 3. Open the existing filesystem image.
      */
     fd = open(image_path, O_RDWR);
 
@@ -582,13 +584,32 @@ int ufs_mount(const char *image_path)
     }
 
     /*
-     * Temporarily store the descriptor so read_block()
-     * can access the image.
+     * 4. Verify that the image has exactly
+     *    the required 1 MiB size.
+     */
+    if (fstat(fd, &st) < 0) {
+        int saved_errno = errno;
+
+        close(fd);
+
+        errno = saved_errno;
+        return -1;
+    }
+
+    if (st.st_size != (off_t)UFS_IMAGE_SIZE) {
+        close(fd);
+        errno = EINVAL;
+        return -1;
+    }
+
+    /*
+     * 5. Store the Linux image descriptor so
+     *    the block I/O helpers can access it.
      */
     g_fs.fd = fd;
 
     /*
-     * Read the superblock from block 0.
+     * 6. Read the superblock from block 0.
      */
     if (read_block(UFS_SUPERBLOCK_BLK, &sb) < 0) {
         int saved_errno = errno;
@@ -601,7 +622,7 @@ int ufs_mount(const char *image_path)
     }
 
     /*
-     * Validate filesystem identity and layout.
+     * 7. Validate the superblock.
      */
     if (validate_superblock(&sb) < 0) {
         int saved_errno = errno;
@@ -614,22 +635,25 @@ int ufs_mount(const char *image_path)
     }
 
     /*
-     * The image is valid.
-     *
-     * Save the superblock in memory and mark the
-     * filesystem as mounted.
+     * 8. Save the validated superblock in memory.
      */
     g_fs.sb = sb;
+
+    /*
+     * 9. Mark the filesystem as mounted.
+     */
     g_fs.mounted = 1;
 
     /*
-     * Every mount starts with an empty descriptor table.
+     * 10. Reset all UFS file descriptors.
      */
     reset_descriptors();
 
+    /*
+     * 11. Mount succeeded.
+     */
     return 0;
 }
-
 /* =========================================================
  * ufs_unmount
  * ========================================================= */
