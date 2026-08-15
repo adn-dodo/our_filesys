@@ -1,47 +1,76 @@
 CC := gcc
 AR := ar
-CFLAGS := -std=c11 -Wall -Wextra -Werror -pedantic -O2
+CPPFLAGS := -Iinclude -Isrc
+CFLAGS := -std=c11 -Wall -Wextra -Werror -pedantic -O2 -pthread
 
-LIB_SOURCES := userfs.c userfs_storage.c namespace.c file_io.c
-LIB_OBJECTS := $(LIB_SOURCES:.c=.o)
-LIBRARY := libuserfs.a
-TEST := test_integration
+BUILD_DIR := build
+LIBRARY := $(BUILD_DIR)/libuserfs.a
 
-.PHONY: all test demo shell sanitize trace clean
+MODULES := userfs ufs_sync userfs_storage journal namespace metadata file_io mmap_io
+LIB_SOURCES := $(addprefix src/,$(addsuffix .c,$(MODULES)))
+LIB_OBJECTS := $(addprefix $(BUILD_DIR)/,$(addsuffix .o,$(MODULES)))
+
+TEST_NAMES := test_integration test_storage_v2 test_journal test_metadata \
+	test_links test_mmap test_permissions_namespace test_crash_recovery
+TEST_BINS := $(addprefix $(BUILD_DIR)/,$(TEST_NAMES))
+
+.PHONY: all test concurrency sanitize shell clean tree
 
 all: $(LIBRARY)
+
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
+
+$(BUILD_DIR)/%.o: src/%.c include/userfs.h include/ufs_internal.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 $(LIBRARY): $(LIB_OBJECTS)
 	$(AR) rcs $@ $^
 
-$(LIB_OBJECTS): userfs.h ufs_internal.h
+$(BUILD_DIR)/test_%: tests/test_%.c $(LIBRARY)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LIBRARY) -o $@
 
-$(TEST): test_integration.c $(LIBRARY)
-	$(CC) $(CFLAGS) test_integration.c -L. -luserfs -o $@
+test: $(TEST_BINS)
+	$(BUILD_DIR)/test_integration
+	$(BUILD_DIR)/test_storage_v2
+	$(BUILD_DIR)/test_journal
+	$(BUILD_DIR)/test_metadata
+	$(BUILD_DIR)/test_links
+	$(BUILD_DIR)/test_mmap
+	$(BUILD_DIR)/test_permissions_namespace
+	$(BUILD_DIR)/test_crash_recovery
 
-test: $(TEST)
-	./$(TEST)
+concurrency: $(BUILD_DIR)/test_threads $(BUILD_DIR)/test_processes
+	$(BUILD_DIR)/test_threads
+	$(BUILD_DIR)/test_processes
 
-demo:
-	$(CC) $(CFLAGS) $(LIB_SOURCES) demo_userfs.c -o demo_userfs
-	./demo_userfs
+sanitize: | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -std=c11 -Wall -Wextra -Werror -pedantic -O1 -g \
+		-pthread -fsanitize=address,undefined -fno-omit-frame-pointer \
+		$(LIB_SOURCES) tests/test_integration.c \
+		-o $(BUILD_DIR)/test_integration_san
+	ASAN_OPTIONS=detect_leaks=0 $(BUILD_DIR)/test_integration_san
+	$(CC) $(CPPFLAGS) -std=c11 -Wall -Wextra -Werror -pedantic -O1 -g \
+		-pthread -fsanitize=address,undefined -fno-omit-frame-pointer \
+		$(LIB_SOURCES) tests/test_links.c -o $(BUILD_DIR)/test_links_san
+	ASAN_OPTIONS=detect_leaks=0 $(BUILD_DIR)/test_links_san
+	$(CC) $(CPPFLAGS) -std=c11 -Wall -Wextra -Werror -pedantic -O1 -g \
+		-pthread -fsanitize=address,undefined -fno-omit-frame-pointer \
+		$(LIB_SOURCES) tests/test_mmap.c -o $(BUILD_DIR)/test_mmap_san
+	ASAN_OPTIONS=detect_leaks=0 $(BUILD_DIR)/test_mmap_san
 
-shell:
-	$(CC) $(CFLAGS) $(LIB_SOURCES) userfs_shell.c -o userfs_shell
-	./userfs_shell
+$(BUILD_DIR)/userfs_shell: apps/userfs_shell.c $(LIBRARY)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LIBRARY) -o $@
 
-sanitize:
-	$(CC) -std=c11 -Wall -Wextra -Werror -pedantic -O1 -g \
-		-fsanitize=address,undefined -fno-omit-frame-pointer \
-		$(LIB_SOURCES) test_integration.c -o test_integration_san
-	ASAN_OPTIONS=detect_leaks=0 ./test_integration_san
+shell: $(BUILD_DIR)/userfs_shell
+	$(BUILD_DIR)/userfs_shell
 
-trace:
-	$(CC) $(CFLAGS) -DUFS_TRACE $(LIB_SOURCES) test_integration.c \
-		-o test_integration_trace
-	./test_integration_trace
+tree:
+	find . -maxdepth 2 -type f ! -path './build/*' | sort
 
 clean:
-	rm -f $(LIB_OBJECTS) test_integration.o $(LIBRARY) $(TEST) test_integration_san \
-		test_integration_trace demo_userfs userfs_shell integration.img \
-		userfs_demo.img userfs_live.img
+	rm -rf $(BUILD_DIR)
+	rm -f integration.img storage_test.img journal_test.img metadata_test.img \
+		links_test.img mmap_test.img mmap_shell.img \
+		userfs_live.img shell_links.img test_permissions.img \
+		test_crash_recovery.img test_threads.img test_processes.img
